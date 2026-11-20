@@ -1,4 +1,10 @@
+# CPU-only PyTorch: the default Linux wheel bundles CUDA (several GB), which is
+# slow to install and can exceed free hosting limits. We only need CPU inference.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+
 chromadb
 sentence-transformers
 datasets
-gradio
+streamlit   # deployed front end (streamlit_app.py)
+gradio      # alternative front end (app.py)

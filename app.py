@@ -4,38 +4,25 @@ app.py — Gradio semantic search over ML arXiv papers.
 Pipeline (step 4 of the assignment; steps 1-3 live in indexer.py):
   4. Build a search app -> embed the query, nearest-neighbour search in Chroma,
                            dedupe chunks by paper, render results as Markdown.
-  5. Publish            -> this file is the entry point of the Hugging Face Space.
+  5. Publish            -> Gradio entry point (for Hugging Face Spaces). The deployed
+                           version uses the Streamlit front end in streamlit_app.py,
+                           which shares the same search logic (search_engine.py).
 
-On first launch (or after the Space's ephemeral disk resets) the index is built
+On first launch (or after the host's ephemeral disk resets) the index is built
 automatically, which takes a few minutes on free CPU hardware.
 """
 
-import urllib.parse
-
-import chromadb
 import gradio as gr
-from sentence_transformers import SentenceTransformer
 
-from indexer import CHROMA_PATH, COLLECTION_NAME, DATASET_NAME, MODEL_NAME, build_index
+from indexer import DATASET_NAME, MODEL_NAME
+from search_engine import get_or_build_collection, index_stats, load_model, search_papers
 
 # ---------------------------------------------------------------------------
 # Startup: load the model once and make sure the index exists
 # ---------------------------------------------------------------------------
-print(f"[app] Loading embedding model {MODEL_NAME} ...", flush=True)
-model = SentenceTransformer(MODEL_NAME)
-
-client = chromadb.PersistentClient(path=CHROMA_PATH)
-try:
-    collection = client.get_collection(COLLECTION_NAME)
-except Exception:  # collection doesn't exist yet
-    collection = None
-
-if collection is None or collection.count() == 0:
-    print("[app] No index found — building it now (first launch takes a few minutes) ...", flush=True)
-    collection = build_index(client, model=model)
-
-N_CHUNKS = collection.count()
-N_PAPERS = len({m["paper_id"] for m in collection.get(include=["metadatas"])["metadatas"]})
+model = load_model()
+collection = get_or_build_collection(model)
+N_PAPERS, N_CHUNKS = index_stats(collection)
 print(f"[app] Index ready: {N_PAPERS} papers, {N_CHUNKS} chunks", flush=True)
 
 
@@ -47,40 +34,18 @@ def search(query, k=5):
     query = (query or "").strip()
     if not query:
         return "Type a question or topic above to search the papers. 🙂"
-    k = int(k)
 
-    # Embed the query with the same model + normalization used for the documents.
-    query_embedding = model.encode([query], normalize_embeddings=True).tolist()
-
-    # Over-fetch chunks, since several chunks may come from the same paper.
-    results = collection.query(
-        query_embeddings=query_embedding,
-        n_results=min(k * 4, N_CHUNKS),
-        include=["metadatas", "distances", "documents"],
-    )
-
-    # Results are sorted by distance, so the first chunk seen for a paper is its best match.
-    hits, seen = [], set()
-    for doc, meta, dist in zip(results["documents"][0], results["metadatas"][0], results["distances"][0]):
-        if meta["paper_id"] in seen:
-            continue
-        seen.add(meta["paper_id"])
-        hits.append((doc, meta, 1 - dist))  # cosine similarity = 1 - cosine distance
-        if len(hits) == k:
-            break
-
+    hits = search_papers(model, collection, query, int(k))
     if not hits:
         return "No results found."
 
     lines = []
-    for rank, (doc, meta, score) in enumerate(hits, start=1):
-        title = meta["title"]
-        link = "https://arxiv.org/search/?" + urllib.parse.urlencode({"query": title, "searchtype": "title"})
+    for rank, hit in enumerate(hits, start=1):
         lines.append(
-            f"### {rank}. {title}\n"
-            f"**Similarity:** `{score:.3f}` · [Find on arXiv]({link})\n\n"
-            f"> **Matched passage:** {doc}\n\n"
-            f"<details><summary>Full abstract</summary>\n\n{meta['abstract']}\n\n</details>\n\n---"
+            f"### {rank}. {hit['title']}\n"
+            f"**Similarity:** `{hit['score']:.3f}` · [Find on arXiv]({hit['link']})\n\n"
+            f"> **Matched passage:** {hit['chunk']}\n\n"
+            f"<details><summary>Full abstract</summary>\n\n{hit['abstract']}\n\n</details>\n\n---"
         )
     return "\n\n".join(lines)
 
